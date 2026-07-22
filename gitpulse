@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""
+gitpulse — a local, self-contained picture of when you actually shipped.
+
+Scans your repos, reads git log, writes one standalone HTML file.
+No server, no network, no dependencies. Open it with a double click.
+
+  gitpulse            regenerate the page
+  gitpulse --open     regenerate and open it
+"""
+
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta, date
+
+# ---------------------------------------------------------------- config
+
+# Folders to scan for git repos (searched a few levels deep).
+ROOTS = [
+    os.path.expanduser("~/Documents"),
+    os.path.expanduser("~/code"),
+    os.path.expanduser("~/dev"),
+    os.path.expanduser("~/projects"),
+]
+
+# Only count commits authored by these emails. Empty list = count everything.
+# Leave as-is to auto-detect from `git config user.email`.
+AUTHOR_EMAILS = []
+
+DAYS = 35                                            # columns on the strip
+OUT = os.path.expanduser("~/gitpulse.html")
+SCAN_DEPTH = 3
+SKIP_DIRS = {"node_modules", "deps", "_build", ".elixir_ls", "vendor",
+             "target", "Library", ".Trash", "venv", ".venv", "dist"}
+
+# Line counts ignore generated/vendored junk so churn reflects authored code,
+# not lockfile churn. git pathspecs, matched anywhere in the tree.
+# Note: git pathspec ':(exclude)**/x' does NOT match a root-level 'x', so
+# lockfiles are listed both bare and globbed.
+EXCLUDE = [
+    # lockfiles (root + nested)
+    "*.lock", "**/*.lock", "*.lockb", "**/*.lockb",
+    "package-lock.json", "**/package-lock.json",
+    "go.sum", "**/go.sum",
+    # captured/generated data: fixtures, snapshots, cassettes
+    "**/fixtures/**", "**/fixture/**", "**/__snapshots__/**",
+    "**/*.snap", "**/cassettes/**", "**/vcr/**",
+    # minified / sourcemaps / vendored / generated code
+    "**/*.min.js", "**/*.min.css", "**/*.map",
+    "**/*.pb.go", "**/*_pb2.py", "**/*.g.dart", "**/*.freezed.dart",
+    "**/node_modules/**", "**/deps/**", "**/_build/**", "**/vendor/**",
+    "**/dist/**", "**/build/**", "**/target/**", "**/generated/**",
+    "**/priv/static/**",
+]
+EXCLUDE = [f":(exclude){p}" for p in EXCLUDE]
+
+# ---------------------------------------------------------------- git
+
+
+def find_repos():
+    found = []
+    for root in ROOTS:
+        if not os.path.isdir(root):
+            continue
+        base_depth = root.rstrip("/").count("/")
+        for dirpath, dirnames, _ in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in SKIP_DIRS and not d.startswith(".git")]
+            if os.path.isdir(os.path.join(dirpath, ".git")):
+                found.append(dirpath)
+                dirnames[:] = []
+                continue
+            if dirpath.count("/") - base_depth >= SCAN_DEPTH:
+                dirnames[:] = []
+    return sorted(set(found))
+
+
+def git(repo, *args):
+    try:
+        out = subprocess.run(["git", "-C", repo, *args],
+                             capture_output=True, text=True, timeout=20)
+        return out.stdout if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def author_emails(repos):
+    if AUTHOR_EMAILS:
+        return {e.lower() for e in AUTHOR_EMAILS}
+    emails = set()
+    for r in repos:
+        e = git(r, "config", "user.email").strip()
+        if e:
+            emails.add(e.lower())
+    globl = subprocess.run(["git", "config", "--global", "user.email"],
+                           capture_output=True, text=True).stdout.strip()
+    if globl:
+        emails.add(globl.lower())
+    return emails
+
+
+def collect(repos, emails, since):
+    commits = []
+    # \x1e record marker, then time/sha/email/subject; --numstat lines follow.
+    fmt = "\x1e%ad\x1f%h\x1f%ae\x1f%s"
+    for repo in repos:
+        name = os.path.basename(repo)
+        raw = git(repo, "log", "--all", "--no-merges", "--numstat",
+                  f"--since={since.isoformat()}",
+                  "--date=format:%Y-%m-%d %H:%M",
+                  f"--pretty=format:{fmt}", "--", ".", *EXCLUDE)
+        cur = None
+        for line in raw.split("\n"):
+            if line.startswith("\x1e"):
+                parts = line[1:].split("\x1f")
+                cur = None
+                if len(parts) != 4:
+                    continue
+                when, sha, email, subject = parts
+                if emails and email.lower() not in emails:
+                    continue
+                try:
+                    ts = datetime.strptime(when, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    continue
+                cur = {"ts": ts, "sha": sha, "repo": name,
+                       "subject": subject, "adds": 0, "dels": 0}
+                commits.append(cur)
+            elif cur is not None and "\t" in line:
+                a, d, _ = (line.split("\t", 2) + ["", "", ""])[:3]
+                # binary files show as '-'; count them as 0 lines
+                cur["adds"] += int(a) if a.isdigit() else 0
+                cur["dels"] += int(d) if d.isdigit() else 0
+    # same commit can appear in several worktrees/clones
+    seen, unique = set(), []
+    for c in sorted(commits, key=lambda c: c["ts"]):
+        key = (c["sha"], c["repo"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(c)
+    return unique
+
+# ---------------------------------------------------------------- colour
+
+
+# hour of day -> colour. Synthwave rotation: cyan night -> magenta noon ->
+# sunset orange -> neon purple. Every tick is a light source.
+RAMP = [
+    (0.0,  (0x00, 0xE5, 0xFF)),
+    (5.0,  (0x2B, 0x6B, 0xFF)),
+    (8.0,  (0x7B, 0x3F, 0xF2)),
+    (12.5, (0xFF, 0x2D, 0x95)),
+    (17.0, (0xFF, 0x6A, 0x3D)),
+    (21.0, (0xB1, 0x4D, 0xFF)),
+    (24.0, (0x00, 0xE5, 0xFF)),
+]
+
+
+def hour_color(h):
+    for i in range(len(RAMP) - 1):
+        h0, c0 = RAMP[i]
+        h1, c1 = RAMP[i + 1]
+        if h0 <= h <= h1:
+            t = 0 if h1 == h0 else (h - h0) / (h1 - h0)
+            rgb = tuple(round(a + (b - a) * t) for a, b in zip(c0, c1))
+            return "#%02x%02x%02x" % rgb
+    return "#00e5ff"
+
+# ---------------------------------------------------------------- stats
+
+
+def streak(days_with_commits, today):
+    if not days_with_commits:
+        return 0
+    cursor = today if today in days_with_commits else today - timedelta(days=1)
+    n = 0
+    while cursor in days_with_commits:
+        n += 1
+        cursor -= timedelta(days=1)
+    return n
+
+
+def esc(s):
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def human(n):
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n/1_000:.1f}k".replace(".0k", "k")
+    return str(n)
+
+# ---------------------------------------------------------------- render
+
+
+def render(commits, repos):
+    today = date.today()
+    days = [today - timedelta(days=i) for i in range(DAYS - 1, -1, -1)]
+    by_day = {d: [] for d in days}
+    for c in commits:
+        d = c["ts"].date()
+        if d in by_day:
+            by_day[d].append(c)
+
+    active = {d for d, cs in by_day.items() if cs}
+    run = streak(active, today)
+    todays = sorted(by_day[today], key=lambda c: c["ts"])
+    week = sum(len(by_day[today - timedelta(days=i)]) for i in range(7))
+    total = sum(len(v) for v in by_day.values())
+
+    def churn(cs):
+        return sum(c["adds"] + c["dels"] for c in cs)
+
+    def adds(cs):
+        return sum(c["adds"] for c in cs)
+
+    def dels(cs):
+        return sum(c["dels"] for c in cs)
+
+    all_commits = [c for cs in by_day.values() for c in cs]
+    total_add = adds(all_commits)
+    total_del = dels(all_commits)
+    week_add = sum(adds(by_day[today - timedelta(days=i)]) for i in range(7))
+    today_add, today_del = adds(todays), dels(todays)
+    max_churn = max((c["adds"] + c["dels"] for c in all_commits), default=0)
+
+    # ---- the strip
+    peak = max((churn(cs) for cs in by_day.values()), default=0)
+    now_frac = (datetime.now().hour + datetime.now().minute / 60) / 24 * 100
+    cols = []
+    for idx, d in enumerate(days):
+        cs = by_day[d]
+        is_today = d == today
+        ticks = []
+        for c in cs:
+            h = c["ts"].hour + c["ts"].minute / 60
+            top = h / 24 * 100
+            col = hour_color(h)
+            # thickness = weight of the commit (log-scaled lines changed)
+            ch = c["adds"] + c["dels"]
+            import math
+            frac = (math.log10(1 + ch) / math.log10(1 + max_churn)) if max_churn > 1 else 0.0
+            hpx = 3 + round(37 * frac)              # 3px trivial -> 40px monster
+            blur = 6 + round(18 * frac)
+            ticks.append(
+                f'<i style="top:{top:.2f}%;height:{hpx}px;background:{col};'
+                f'box-shadow:0 0 {blur//3}px {col},0 0 {blur}px {col}cc,0 0 {blur*2}px {col}66" '
+                f'title="{esc(c["ts"].strftime("%H:%M"))} · {esc(c["repo"])} · '
+                f'+{c["adds"]} −{c["dels"]} · {esc(c["subject"])}"></i>')
+        # heat: heavier days (more lines) glow brighter from behind the tube
+        heat = 0 if peak == 0 else min(1.0, churn(cs) / max(peak, 1))
+        weekend = " we" if d.weekday() >= 5 else ""
+        klass = "col" + weekend + (" today" if is_today else "")
+        dot = "on" if cs else "off"
+        label = ""
+        if d.day == 1 or idx == 0:
+            label = d.strftime("%b").lower()
+        # live now-line marker only on today's still-open column
+        nowline = (f'<b class="now" style="top:{now_frac:.2f}%"></b>'
+                   if is_today else "")
+        # gap days get a red glitch scar instead of an empty tube
+        scar = "" if cs else '<u class="scar"></u>'
+        cols.append(
+            f'<div class="{klass}" style="--i:{idx};--heat:{heat:.2f}">'
+            f'<div class="tube">{scar}{"".join(ticks)}{nowline}</div>'
+            f'<div class="dot {dot}" title="{d.isoformat()} · {len(cs)} commits · '
+            f'+{adds(cs)} −{dels(cs)}"></div>'
+            f'<div class="dlab">{label}</div>'
+            f'</div>')
+
+    # ---- today's log
+    if todays:
+        tmax = max((c["adds"] + c["dels"] for c in todays), default=1) or 1
+        def row(c):
+            w = (c["adds"] + c["dels"]) / tmax * 100
+            col = hour_color(c["ts"].hour + c["ts"].minute / 60)
+            return (
+                f'<li><span class="t" style="color:{col}">'
+                f'{c["ts"].strftime("%H:%M")}</span>'
+                f'<span class="r">{esc(c["repo"])}</span>'
+                f'<span class="ch"><span class="add">+{c["adds"]}</span>'
+                f'<span class="del">−{c["dels"]}</span></span>'
+                f'<span class="bar"><i style="width:{w:.1f}%;background:{col};'
+                f'box-shadow:0 0 8px {col}"></i></span>'
+                f'<span class="s">{esc(c["subject"])}</span></li>')
+        rows = "".join(row(c) for c in todays)
+        span = (f'{todays[0]["ts"].strftime("%H:%M")}–'
+                f'{todays[-1]["ts"].strftime("%H:%M")}')
+        today_val = f'+{human(today_add)}'
+        today_sub = f'{len(todays)} commits · {span}'
+    else:
+        rows = '<li class="empty">Nothing yet today. The column is still open.</li>'
+        today_val, today_sub = "—", "nothing shipped yet"
+
+    # hero: the sheer weight — total lines shipped over the window
+    head_num = human(total_add)
+    head_lab = f"lines shipped · {DAYS} days"
+    streak_lab = ("day" if run == 1 else "days") + " without a gap"
+
+    if run == 0:
+        context = "streak broken — start one today"
+    elif run == 1:
+        context = "1 day streak"
+    else:
+        context = f"{run} days without a gap"
+    scoreboard = (
+        f'<div class="stat today"><div class="k">today</div>'
+        f'<div class="v">{esc(today_val)}</div>'
+        f'<div class="sub">{esc(today_sub)}</div></div>'
+        f'<div class="ctx">{esc(context)}</div>')
+
+    stamp = datetime.now().strftime("%a %d %b %Y · %H:%M")
+    repo_line = " · ".join(sorted({os.path.basename(r) for r in repos})[:8])
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gitpulse</title>
+<style>
+  :root {{
+    --ink:#04060b; --panel:#080b14; --line:#17203a;
+    --text:#d6e4ff; --mute:#5a6a94;
+    --cyan:#00e5ff; --magenta:#ff2d95; --purple:#b14dff;
+    --display:"SF Mono",ui-monospace,Menlo,monospace;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }}
+  * {{ box-sizing:border-box; }}
+  html {{ background:var(--ink); }}
+  body {{
+    margin:0; padding:40px 32px 56px; color:var(--text);
+    font-family:var(--mono); font-size:13px; -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(1200px 600px at 70% -10%, #1b0b3a55, transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, #06294555, transparent 60%),
+      var(--ink);
+    position:relative; overflow-x:hidden;
+  }}
+  /* CRT scanlines + vignette overlay */
+  body::before {{ content:""; position:fixed; inset:0; pointer-events:none; z-index:9;
+    background:repeating-linear-gradient(0deg,
+      rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px,
+      rgba(0,0,0,.22) 3px, rgba(0,0,0,0) 4px);
+    mix-blend-mode:multiply; }}
+  body::after {{ content:""; position:fixed; inset:0; pointer-events:none; z-index:8;
+    background:radial-gradient(120% 120% at 50% 50%, transparent 55%, #000a 100%); }}
+  .wrap {{ max-width:1180px; margin:0 auto; position:relative; z-index:1; }}
+
+  header {{ display:flex; justify-content:space-between; align-items:baseline;
+           border-bottom:1px solid var(--line); padding-bottom:14px;
+           position:relative; overflow:hidden; }}
+  /* scanline sweep across the header */
+  header::after {{ content:""; position:absolute; left:-30%; top:0; bottom:0; width:30%;
+    background:linear-gradient(90deg, transparent, #00e5ff22, #00e5ff55, transparent);
+    animation:sweep 6s linear infinite; }}
+  @keyframes sweep {{ to {{ left:130%; }} }}
+  .brand {{ font-size:18px; letter-spacing:.14em; text-transform:uppercase;
+            color:var(--cyan); text-shadow:0 0 8px #00e5ff88, 0 0 22px #00e5ff44; }}
+  .brand em {{ font-style:normal; color:var(--mute); text-shadow:none;
+               letter-spacing:.06em; }}
+  .stamp {{ color:var(--magenta); font-size:11px; letter-spacing:.14em;
+            text-shadow:0 0 8px #ff2d9566; }}
+
+  .hero {{ display:flex; align-items:flex-end; gap:26px; margin:48px 0 34px; }}
+  .num {{ font-size:132px; line-height:.78; letter-spacing:-.04em; font-weight:700;
+          color:#eafcff; position:relative;
+          text-shadow:
+            0 0 6px #fff, 0 0 20px var(--cyan), 0 0 50px var(--cyan),
+            2px 0 var(--magenta), -2px 0 var(--cyan);
+          animation:flick 5.5s steps(1) infinite; }}
+  @keyframes flick {{ 0%,97%,100%{{opacity:1}} 97.5%{{opacity:.72}} 98.5%{{opacity:1}} 99%{{opacity:.85}} }}
+  .lab {{ color:var(--purple); font-size:13px; letter-spacing:.16em;
+          text-transform:uppercase; padding-bottom:10px;
+          text-shadow:0 0 10px #b14dff55; }}
+  .side {{ margin-left:auto; text-align:right; padding-bottom:6px; }}
+  .stat .k {{ color:var(--mute); font-size:10px; letter-spacing:.22em;
+              text-transform:uppercase; }}
+  .stat .v {{ font-size:52px; line-height:1.0; color:#39ff88;
+              letter-spacing:-.02em; font-variant-numeric:tabular-nums;
+              text-shadow:0 0 16px #39ff8877; }}
+  .stat .sub {{ color:var(--mute); font-size:12px; letter-spacing:.03em;
+                margin-top:3px; }}
+  .side .ctx {{ color:var(--mute); font-size:11px; letter-spacing:.06em;
+                margin-top:16px; opacity:.75; }}
+
+  /* the strip */
+  .strip {{ display:flex; gap:12px; background:var(--panel);
+            border:1px solid var(--line); border-radius:4px; padding:20px 18px 14px;
+            box-shadow:inset 0 0 60px #00e5ff0d, 0 0 0 1px #00e5ff11,
+                       0 20px 60px #000a;
+            background-image:linear-gradient(#00e5ff08 1px, transparent 1px),
+                             linear-gradient(90deg,#00e5ff08 1px, transparent 1px);
+            background-size:100% 25%, 3.5% 100%; }}
+  .hours {{ width:26px; height:320px; position:relative; flex:none;
+            color:var(--mute); font-size:10px; letter-spacing:.08em; }}
+  .hours span {{ position:absolute; right:0; transform:translateY(-50%); }}
+  .cols {{ display:flex; gap:3px; flex:1; align-items:flex-start; }}
+  .col {{ flex:1 1 0; min-width:0; }}
+  .tube {{ position:relative; height:320px; background:#05080f;
+           border-radius:2px; overflow:hidden;
+           box-shadow:inset 0 0 0 1px #ffffff08; }}
+  .col.we .tube {{ background:#070a12; }}
+  /* grind-day heat bloom from behind the ticks */
+  .tube::before {{ content:""; position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(0deg, #ff2d9500, #ff2d9522 40%, #00e5ff22 100%);
+    opacity:var(--heat,0); mix-blend-mode:screen; }}
+  .col.today .tube {{ box-shadow:inset 0 0 0 1px #00e5ff55, 0 0 18px #00e5ff44; }}
+  .tube i {{ position:absolute; left:0; right:0; height:3px; border-radius:3px;
+             animation:rise .55s cubic-bezier(.2,.8,.2,1) both;
+             animation-delay:calc(var(--i) * 16ms); }}
+  @keyframes rise {{ from {{ opacity:0; transform:translateY(6px) scaleX(.4); }}
+                     to {{ opacity:1; transform:none; }} }}
+  /* live now-line on today */
+  .tube .now {{ position:absolute; left:0; right:0; height:1px; background:#eafcff;
+    box-shadow:0 0 6px #fff, 0 0 14px var(--cyan); animation:pulseline 1.6s ease-in-out infinite; }}
+  .tube .now::after {{ content:""; position:absolute; right:-1px; top:-2px; width:5px; height:5px;
+    border-radius:50%; background:#eafcff; box-shadow:0 0 8px #fff,0 0 16px var(--cyan); }}
+  @keyframes pulseline {{ 0%,100%{{opacity:.55}} 50%{{opacity:1}} }}
+  /* gap-day red glitch scar: a short vertical slash, not a full-width rule */
+  .tube .scar {{ position:absolute; left:50%; top:38%; bottom:38%; width:2px;
+    margin-left:-1px; background:#ff2b3d;
+    box-shadow:0 0 8px #ff2b3d,0 0 16px #ff2b3d99;
+    animation:glitch 2.6s steps(2) infinite; opacity:.85; }}
+  @keyframes glitch {{ 0%,100%{{transform:translateX(0)}} 50%{{transform:translateX(1px)}} 92%{{transform:translateX(-2px)}} }}
+  .dot {{ width:6px; height:6px; border-radius:50%; margin:9px auto 0; }}
+  .dot.on {{ background:var(--cyan); box-shadow:0 0 8px var(--cyan),0 0 16px #00e5ff88; }}
+  .dot.off {{ background:transparent; border:1px solid #ff2b3d66;
+              box-shadow:0 0 6px #ff2b3d33; }}
+  .dlab {{ text-align:center; color:var(--mute); font-size:9px;
+           letter-spacing:.1em; height:14px; line-height:14px; }}
+
+  /* today */
+  .wrap > .today {{ margin-top:40px; }}
+  .today h2 {{ font-size:13px; font-weight:400; margin:0 0 12px;
+               letter-spacing:.16em; text-transform:uppercase; color:var(--magenta);
+               text-shadow:0 0 10px #ff2d9555; }}
+  ul {{ list-style:none; margin:0; padding:0; border-top:1px solid var(--line); }}
+  li {{ display:flex; gap:16px; padding:9px 2px; border-bottom:1px solid var(--line);
+        transition:background .15s; }}
+  li:hover {{ background:#00e5ff08; }}
+  li .t {{ flex:none; width:44px; text-shadow:0 0 8px currentColor; }}
+  li .r {{ flex:none; width:96px; color:var(--purple); overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }}
+  li .ch {{ flex:none; width:104px; display:flex; gap:8px; justify-content:flex-end;
+           font-variant-numeric:tabular-nums; }}
+  li .ch .add {{ color:#39ff88; text-shadow:0 0 8px #39ff8855; }}
+  li .ch .del {{ color:#ff4d6d; text-shadow:0 0 8px #ff4d6d55; }}
+  li .bar {{ flex:none; width:120px; height:8px; background:#0c1120;
+            border-radius:2px; overflow:hidden; align-self:center;
+            box-shadow:inset 0 0 0 1px #ffffff08; }}
+  li .bar i {{ display:block; height:100%; border-radius:2px; min-width:2px; }}
+  li .s {{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+           white-space:nowrap; }}
+  li.empty {{ color:var(--mute); }}
+
+  footer {{ margin-top:30px; color:var(--mute); font-size:11px;
+            letter-spacing:.08em; }}
+
+  @media (max-width:720px) {{
+    body {{ padding:24px 16px 40px; }}
+    .num {{ font-size:88px; }}
+    .side {{ display:none; }}
+    .tube, .hours {{ height:220px; }}
+    li .r, li .bar {{ display:none; }}
+  }}
+  @media (prefers-reduced-motion:reduce) {{
+    .tube i, .tube .now, .tube .scar, .num, header::after {{ animation:none; }}
+  }}
+</style></head><body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">gitpulse <em>— when you actually shipped</em></div>
+    <div class="stamp">{stamp}</div>
+  </header>
+
+  <div class="hero">
+    <div class="num">{head_num}</div>
+    <div class="lab">{head_lab}</div>
+    <div class="side">{scoreboard}</div>
+  </div>
+
+  <div class="strip">
+    <div class="hours">
+      <span style="top:0%">00</span>
+      <span style="top:25%">06</span>
+      <span style="top:50%">12</span>
+      <span style="top:75%">18</span>
+      <span style="top:100%">24</span>
+    </div>
+    <div class="cols">{''.join(cols)}</div>
+  </div>
+
+  <div class="today">
+    <h2>Today</h2>
+    <ul>{rows}</ul>
+  </div>
+
+  <footer>{esc(repo_line)}</footer>
+</div>
+</body></html>"""
+
+
+def main():
+    repos = find_repos()
+    if not repos:
+        print("gitpulse: no repos found. Edit ROOTS at the top of this file.",
+              file=sys.stderr)
+        sys.exit(1)
+    emails = author_emails(repos)
+    since = date.today() - timedelta(days=DAYS + 2)
+    commits = collect(repos, emails, since)
+    html = render(commits, repos)
+    with open(OUT, "w") as f:
+        f.write(html)
+    if "--open" in sys.argv:
+        subprocess.run(["open", OUT])
+    elif "--quiet" not in sys.argv:
+        print(f"gitpulse: {len(commits)} commits across {len(repos)} repos -> {OUT}")
+
+
+if __name__ == "__main__":
+    main()
