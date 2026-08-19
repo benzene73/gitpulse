@@ -3,11 +3,11 @@
 gitpulse — a local, self-contained picture of when you actually shipped.
 
 Scans your repos, reads git log, writes one standalone HTML file.
-No server or dependencies. Network access is opt-in. Open it with a double click.
+No server or dependencies. Interactive runs refresh remotes first.
 
-  gitpulse            regenerate and open the page
-  gitpulse --fetch    fetch remotes, regenerate, and open
-  gitpulse --no-open  regenerate without opening
+  gitpulse             fetch, regenerate, and open the page
+  gitpulse --no-fetch  use local refs, regenerate, and open
+  gitpulse --no-open   fetch and regenerate without opening
 """
 
 import os
@@ -32,6 +32,7 @@ AUTHOR_EMAILS = [
 ]
 
 DAYS = 35                                            # columns on the strip
+HISTORY_DAYS = 90                                    # psychology baseline
 OUT = os.path.expanduser("~/gitpulse.html")
 
 # Line counts ignore generated/vendored junk so churn reflects authored code,
@@ -188,6 +189,35 @@ def streak(days_with_commits, today):
     return n
 
 
+def longest_streak(days_with_commits):
+    longest = current = 0
+    previous = None
+    for active_day in sorted(days_with_commits):
+        current = current + 1 if previous == active_day - timedelta(days=1) else 1
+        longest = max(longest, current)
+        previous = active_day
+    return longest
+
+
+def three_day_output(commits, today):
+    current_start = today - timedelta(days=2)
+
+    def additions_between(start, finish):
+        return sum(
+            commit["adds"]
+            for commit in commits
+            if start <= commit["ts"].date() <= finish
+        )
+
+    current = additions_between(current_start, today)
+    previous_six_days = additions_between(
+        current_start - timedelta(days=6),
+        current_start - timedelta(days=1)
+    )
+    target = max(1, round(previous_six_days / 2))
+    return current, target
+
+
 def esc(s):
     return (s.replace("&", "&amp;").replace("<", "&lt;")
              .replace(">", "&gt;").replace('"', "&quot;"))
@@ -205,38 +235,42 @@ def human(n):
 
 def render(commits, repos):
     today = date.today()
-    days = [today - timedelta(days=i) for i in range(DAYS - 1, -1, -1)]
-    by_day = {d: [] for d in days}
-    for c in commits:
-        d = c["ts"].date()
-        if d in by_day:
-            by_day[d].append(c)
+    now = datetime.now()
+    history_days = [
+        today - timedelta(days=i)
+        for i in range(HISTORY_DAYS - 1, -1, -1)
+    ]
+    history_by_day = {d: [] for d in history_days}
+    for commit in commits:
+        commit_day = commit["ts"].date()
+        if commit_day in history_by_day:
+            history_by_day[commit_day].append(commit)
 
-    active = {d for d, cs in by_day.items() if cs}
+    days = history_days[-DAYS:]
+    by_day = {d: history_by_day[d] for d in days}
+    active = {d for d, day_commits in history_by_day.items() if day_commits}
     run = streak(active, today)
-    todays = sorted(by_day[today], key=lambda c: c["ts"])
-    week = sum(len(by_day[today - timedelta(days=i)]) for i in range(7))
-    total = sum(len(v) for v in by_day.values())
+    best_run = longest_streak(active)
+    three_day_additions, three_day_goal = three_day_output(commits, today)
+    todays = sorted(history_by_day[today], key=lambda c: c["ts"])
 
-    def churn(cs):
-        return sum(c["adds"] + c["dels"] for c in cs)
+    def churn(day_commits):
+        return sum(c["adds"] + c["dels"] for c in day_commits)
 
-    def adds(cs):
-        return sum(c["adds"] for c in cs)
+    def adds(day_commits):
+        return sum(c["adds"] for c in day_commits)
 
-    def dels(cs):
-        return sum(c["dels"] for c in cs)
+    def dels(day_commits):
+        return sum(c["dels"] for c in day_commits)
 
-    all_commits = [c for cs in by_day.values() for c in cs]
+    all_commits = [c for day_commits in by_day.values() for c in day_commits]
     total_add = adds(all_commits)
-    total_del = dels(all_commits)
-    week_add = sum(adds(by_day[today - timedelta(days=i)]) for i in range(7))
     today_add, today_del = adds(todays), dels(todays)
     max_churn = max((c["adds"] + c["dels"] for c in all_commits), default=0)
 
     # ---- the strip
     peak = max((churn(cs) for cs in by_day.values()), default=0)
-    now_frac = (datetime.now().hour + datetime.now().minute / 60) / 24 * 100
+    now_frac = (now.hour + now.minute / 60) / 24 * 100
     cols = []
     for idx, d in enumerate(days):
         cs = by_day[d]
@@ -278,9 +312,10 @@ def render(commits, repos):
             f'<div class="dlab">{label}</div>'
             f'</div>')
 
-    # ---- today's log
+    # ---- today's log and receipt
     if todays:
         tmax = max((c["adds"] + c["dels"] for c in todays), default=1) or 1
+
         def row(c):
             w = (c["adds"] + c["dels"]) / tmax * 100
             col = hour_color(c["ts"].hour + c["ts"].minute / 60)
@@ -293,31 +328,72 @@ def render(commits, repos):
                 f'<span class="bar"><i style="width:{w:.1f}%;background:{col};'
                 f'box-shadow:0 0 8px {col}"></i></span>'
                 f'<span class="s">{esc(c["subject"])}</span></li>')
+
         rows = "".join(row(c) for c in todays)
         span = (f'{todays[0]["ts"].strftime("%H:%M")}–'
                 f'{todays[-1]["ts"].strftime("%H:%M")}')
         today_val = f'+{human(today_add)}'
-        today_sub = f'{len(todays)} commits · {span}'
+        repo_count = len({c["repo"] for c in todays})
+        receipt_state = "NIGHT RECEIPT" if now.hour >= 20 else "LIVE FEED"
+        receipt_meta = (
+            f'{len(todays)} commits · {repo_count} repos · {span} · '
+            f'−{human(today_del)} lines'
+        )
     else:
-        rows = '<li class="empty">Nothing yet today. The column is still open.</li>'
-        today_val, today_sub = "—", "nothing shipped yet"
+        rows = '<li class="empty">No transmission yet. Today is still writable.</li>'
+        today_val = "—"
+        receipt_state = "OPEN SLOT"
+        receipt_meta = "zero commits · the day is still live"
 
-    # hero: the sheer weight — total lines shipped over the window
+    # ---- streak pressure
+    best_run = max(best_run, run)
+    if todays:
+        streak_class = "locked"
+        streak_badge = ""
+    elif run:
+        midnight = datetime.combine(today + timedelta(days=1), datetime.min.time())
+        seconds_left = max(0, int((midnight - now).total_seconds()))
+        hours_left, remainder = divmod(seconds_left, 3600)
+        minutes_left = remainder // 60
+        streak_class = "risk"
+        streak_badge = f"AT RISK · {hours_left:02d}h {minutes_left:02d}m left"
+    else:
+        streak_class = "reboot"
+        streak_badge = ""
+    badge_html = f"<b>{streak_badge}</b>" if streak_badge else ""
+    record_progress = min(100, run / max(best_run, 1) * 100)
+    streak_console = (
+        f'<div class="streak-console {streak_class}">'
+        f'<div class="console-top"><span>STREAK</span>{badge_html}</div>'
+        f'<div class="run"><strong>{run:02d}</strong><span>days</span></div>'
+        f'<div class="record"><span>{HISTORY_DAYS}D BEST</span>'
+        f'<b>{best_run:02d} DAYS</b></div>'
+        f'<div class="record-track"><i style="width:{record_progress:.1f}%"></i></div>'
+        f'</div>'
+    )
+
+    # ---- adaptive three-day output
+    goal_remaining = max(0, three_day_goal - three_day_additions)
+    goal_state = "GOAL CLEARED" if goal_remaining == 0 else f"+{human(goal_remaining)} TO GO"
+    goal_progress = min(100, three_day_additions / max(three_day_goal, 1) * 100)
+    mission_card = (
+        f'<div class="mission-card"><div class="card-top">'
+        f'<span>3-DAY OUTPUT</span><b>{goal_state}</b></div>'
+        f'<div class="mission-score"><strong>+{human(three_day_additions)}</strong>'
+        f'<span>/ +{human(three_day_goal)} target</span></div>'
+        f'<div class="output-track"><i style="width:{goal_progress:.1f}%"></i></div>'
+        f'<div class="card-foot">target · prior 6 days ÷ 2</div></div>'
+    )
+    receipt_card = (
+        f'<div class="receipt-card"><div class="card-top">'
+        f'<span>TODAY // RECEIPT</span><b>{receipt_state}</b></div>'
+        f'<div class="receipt-score">{esc(today_val)}</div>'
+        f'<div class="receipt-meta">{esc(receipt_meta)}</div></div>'
+    )
+
+    # hero: the sheer weight — total lines shipped over the visible window
     head_num = human(total_add)
     head_lab = f"lines shipped · {DAYS} days"
-    streak_lab = ("day" if run == 1 else "days") + " without a gap"
-
-    if run == 0:
-        context = "streak broken — start one today"
-    elif run == 1:
-        context = "1 day streak"
-    else:
-        context = f"{run} days without a gap"
-    scoreboard = (
-        f'<div class="stat today"><div class="k">today</div>'
-        f'<div class="v">{esc(today_val)}</div>'
-        f'<div class="sub">{esc(today_sub)}</div></div>'
-        f'<div class="ctx">{esc(context)}</div>')
 
     stamp = datetime.now().strftime("%a %d %b %Y · %H:%M")
     repo_line = " · ".join(sorted({os.path.basename(r) for r in repos})[:8])
@@ -325,12 +401,14 @@ def render(commits, repos):
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
 <title>gitpulse</title>
 <style>
   :root {{
     --ink:#04060b; --panel:#080b14; --line:#17203a;
     --text:#d6e4ff; --mute:#5a6a94;
     --cyan:#00e5ff; --magenta:#ff2d95; --purple:#b14dff;
+    --green:#39ff88; --danger:#ff2b3d; --amber:#ffb000;
     --display:"SF Mono",ui-monospace,Menlo,monospace;
     --mono:"SF Mono",ui-monospace,Menlo,monospace;
   }}
@@ -367,30 +445,89 @@ def render(commits, repos):
             color:var(--cyan); text-shadow:0 0 8px #00e5ff88, 0 0 22px #00e5ff44; }}
   .brand em {{ font-style:normal; color:var(--mute); text-shadow:none;
                letter-spacing:.06em; }}
+  .version {{ display:inline-block; margin-left:12px; padding:3px 7px;
+              border:1px solid #ff2d9588; color:var(--magenta); font-size:9px;
+              letter-spacing:.16em; vertical-align:2px; box-shadow:0 0 12px #ff2d9533;
+              animation:statusblink 3.2s steps(1) infinite; }}
+  @keyframes statusblink {{ 0%,94%,100%{{opacity:1}} 95%,97%{{opacity:.35}} }}
   .stamp {{ color:var(--magenta); font-size:11px; letter-spacing:.14em;
             text-shadow:0 0 8px #ff2d9566; }}
 
-  .hero {{ display:flex; align-items:flex-end; gap:26px; margin:48px 0 34px; }}
+  .hero {{ display:flex; align-items:stretch; gap:34px; margin:48px 0 24px; }}
+  .hero-output {{ display:flex; align-items:flex-end; gap:26px; flex:1; min-width:0; }}
   .num {{ font-size:132px; line-height:.78; letter-spacing:-.04em; font-weight:700;
           color:#eafcff; position:relative;
           text-shadow:
             0 0 6px #fff, 0 0 20px var(--cyan), 0 0 50px var(--cyan),
             2px 0 var(--magenta), -2px 0 var(--cyan);
           animation:flick 5.5s steps(1) infinite; }}
+  .num::after {{ content:""; position:absolute; left:0; right:12%; top:48%; height:2px;
+                  background:var(--magenta); opacity:.65; mix-blend-mode:screen;
+                  animation:numslice 4.7s steps(1) infinite; }}
   @keyframes flick {{ 0%,97%,100%{{opacity:1}} 97.5%{{opacity:.72}} 98.5%{{opacity:1}} 99%{{opacity:.85}} }}
+  @keyframes numslice {{ 0%,92%,100%{{transform:translateX(0);opacity:0}}
+                         93%{{transform:translateX(8px);opacity:.8}}
+                         94%{{transform:translateX(-5px);opacity:.35}} }}
   .lab {{ color:var(--purple); font-size:13px; letter-spacing:.16em;
           text-transform:uppercase; padding-bottom:10px;
           text-shadow:0 0 10px #b14dff55; }}
-  .side {{ margin-left:auto; text-align:right; padding-bottom:6px; }}
-  .stat .k {{ color:var(--mute); font-size:10px; letter-spacing:.22em;
-              text-transform:uppercase; }}
-  .stat .v {{ font-size:52px; line-height:1.0; color:#39ff88;
-              letter-spacing:-.02em; font-variant-numeric:tabular-nums;
-              text-shadow:0 0 16px #39ff8877; }}
-  .stat .sub {{ color:var(--mute); font-size:12px; letter-spacing:.03em;
-                margin-top:3px; }}
-  .side .ctx {{ color:var(--mute); font-size:11px; letter-spacing:.06em;
-                margin-top:16px; opacity:.75; }}
+  .side {{ width:330px; flex:none; }}
+  .streak-console {{ height:100%; min-height:128px; padding:15px 17px 13px;
+                     border:1px solid #39ff8866; position:relative; overflow:hidden;
+                     clip-path:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,0 100%);
+                     background:linear-gradient(135deg,#07150f,#080b14 55%);
+                     box-shadow:inset 0 0 35px #39ff8810,0 0 22px #39ff8816; }}
+  .streak-console::before {{ content:""; position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(105deg,transparent 35%,#39ff8815 50%,transparent 65%);
+    transform:translateX(-100%); animation:cardsweep 5s ease-in-out infinite; }}
+  .streak-console.risk {{ border-color:#ff2b3daa; background:linear-gradient(135deg,#1a080b,#080b14 60%);
+                          box-shadow:inset 0 0 42px #ff2b3d18,0 0 26px #ff2b3d22; }}
+  .streak-console.reboot {{ border-color:#ffb00088; }}
+  .console-top,.card-top {{ display:flex; justify-content:space-between; align-items:center;
+                            font-size:9px; letter-spacing:.2em; color:var(--mute); }}
+  .console-top b,.card-top b {{ color:var(--green); font-size:9px; font-weight:500;
+                                text-shadow:0 0 10px currentColor; }}
+  .risk .console-top b {{ color:var(--danger); animation:alarm .9s steps(1) infinite; }}
+  @keyframes alarm {{ 50%{{opacity:.28}} }}
+  .run {{ display:flex; align-items:baseline; gap:9px; margin-top:6px; }}
+  .run strong {{ font-size:43px; line-height:1; color:#effff6; font-weight:650;
+                 text-shadow:0 0 18px #39ff8877; font-variant-numeric:tabular-nums; }}
+  .run span {{ color:var(--green); font-size:10px; letter-spacing:.12em; text-transform:uppercase; }}
+  .record {{ display:flex; justify-content:space-between; color:var(--mute); font-size:9px;
+             letter-spacing:.13em; margin-top:3px; }}
+  .record b {{ color:var(--purple); font-size:11px; }}
+  .record-track {{ height:3px; background:#101527; margin-top:5px; overflow:hidden; }}
+  .record-track i {{ display:block; height:100%; background:linear-gradient(90deg,var(--purple),var(--cyan));
+                     box-shadow:0 0 10px var(--cyan); }}
+
+  .mission-grid {{ display:grid; grid-template-columns:1fr 1.35fr; gap:12px; margin:26px 0; }}
+  .mission-card,.receipt-card {{ min-height:150px; padding:17px 19px; position:relative; overflow:hidden;
+    border:1px solid var(--line); background:linear-gradient(135deg,#080d18,#070911);
+    box-shadow:inset 0 0 40px #00e5ff0a,0 14px 38px #0008; animation:boot .55s ease-out both; }}
+  .mission-card {{ border-color:#b14dff55; }}
+  .receipt-card {{ border-color:#00e5ff55; animation-delay:.08s; }}
+  .mission-card::after,.receipt-card::after {{ content:""; position:absolute; width:80px; height:1px;
+    right:0; top:0; background:var(--cyan); box-shadow:0 0 12px var(--cyan); }}
+  @keyframes boot {{ from{{opacity:0;transform:translateY(9px)}} to{{opacity:1;transform:none}} }}
+  @keyframes cardsweep {{ 0%,55%{{transform:translateX(-100%)}} 80%,100%{{transform:translateX(100%)}} }}
+  .mission-score {{ display:flex; align-items:baseline; gap:8px; margin:13px 0 10px; }}
+  .mission-score strong {{ color:#f7efff; font-size:42px; line-height:.8; text-shadow:0 0 18px #b14dffaa; }}
+  .mission-score span {{ color:var(--purple); text-transform:uppercase; letter-spacing:.1em; font-size:10px; }}
+  .output-track {{ height:10px; background:#101426; border:1px solid #1c2542;
+                   transform:skewX(-12deg); overflow:hidden; }}
+  .output-track i {{ display:block; height:100%; background:linear-gradient(90deg,var(--purple),var(--magenta));
+                     box-shadow:0 0 8px #ff2d9588,0 0 18px #b14dff55; position:relative; }}
+  .output-track i::after {{ content:""; position:absolute; inset:0;
+    background:linear-gradient(90deg,transparent,#ffffff66,transparent);
+    transform:translateX(-100%); animation:outputscan 2.8s ease-in-out infinite; }}
+  @keyframes outputscan {{ 55%,100%{{transform:translateX(100%)}} }}
+  .card-foot {{ color:var(--mute); font-size:9px; letter-spacing:.08em; margin-top:10px; }}
+  .receipt-score {{ font-size:42px; line-height:1; color:var(--green); margin-top:9px;
+                    text-shadow:0 0 18px #39ff8877; }}
+  .receipt-meta {{ color:var(--mute); font-size:10px; letter-spacing:.04em; margin-top:3px; }}
+  .section-label {{ display:flex; justify-content:space-between; margin:0 2px 9px;
+                    color:var(--mute); font-size:9px; letter-spacing:.19em; }}
+  .section-label b {{ color:var(--cyan); font-weight:400; text-shadow:0 0 10px #00e5ff77; }}
 
   /* the strip */
   .strip {{ display:flex; gap:12px; background:var(--panel);
@@ -403,7 +540,7 @@ def render(commits, repos):
   .hours {{ width:26px; height:320px; position:relative; flex:none;
             color:var(--mute); font-size:10px; letter-spacing:.08em; }}
   .hours span {{ position:absolute; right:0; transform:translateY(-50%); }}
-  .cols {{ display:flex; gap:3px; flex:1; align-items:flex-start; }}
+  .cols {{ display:flex; gap:3px; flex:1; min-width:0; align-items:flex-start; }}
   .col {{ flex:1 1 0; min-width:0; }}
   .tube {{ position:relative; height:320px; background:#05080f;
            border-radius:2px; overflow:hidden;
@@ -438,14 +575,17 @@ def render(commits, repos):
   .dlab {{ text-align:center; color:var(--mute); font-size:9px;
            letter-spacing:.1em; height:14px; line-height:14px; }}
 
-  /* today */
-  .wrap > .today {{ margin-top:40px; }}
-  .today h2 {{ font-size:13px; font-weight:400; margin:0 0 12px;
-               letter-spacing:.16em; text-transform:uppercase; color:var(--magenta);
-               text-shadow:0 0 10px #ff2d9555; }}
+  /* transmission log */
+  .wrap > .today {{ margin-top:36px; }}
+  .today-head {{ display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:12px; }}
+  .today-head span {{ display:block; color:var(--mute); font-size:8px; letter-spacing:.2em; margin-bottom:4px; }}
+  .today h2 {{ font-size:13px; font-weight:400; margin:0; letter-spacing:.16em;
+               text-transform:uppercase; color:var(--magenta); text-shadow:0 0 10px #ff2d9555; }}
+  .today-head b {{ color:var(--green); font-size:9px; font-weight:400; letter-spacing:.14em;
+                   padding:4px 7px; border:1px solid #39ff8855; box-shadow:0 0 12px #39ff8822; }}
   ul {{ list-style:none; margin:0; padding:0; border-top:1px solid var(--line); }}
-  li {{ display:flex; gap:16px; padding:9px 2px; border-bottom:1px solid var(--line);
-        transition:background .15s; }}
+  li {{ display:flex; gap:16px; padding:10px 8px; border-bottom:1px solid var(--line);
+        transition:background .15s; position:relative; }}
   li:hover {{ background:#00e5ff08; }}
   li .t {{ flex:none; width:44px; text-shadow:0 0 8px currentColor; }}
   li .r {{ flex:none; width:150px; color:var(--purple); overflow:hidden;
@@ -465,30 +605,39 @@ def render(commits, repos):
   footer {{ margin-top:30px; color:var(--mute); font-size:11px;
             letter-spacing:.08em; }}
 
+  @media (max-width:900px) {{
+    .hero {{ flex-direction:column; }}
+    .side {{ width:100%; }}
+    .mission-grid {{ grid-template-columns:1fr; }}
+  }}
   @media (max-width:720px) {{
     body {{ padding:24px 16px 40px; }}
-    .num {{ font-size:88px; }}
-    .side {{ display:none; }}
+    .brand em,.stamp {{ display:none; }}
+    .hero-output {{ display:block; }}
+    .num {{ font-size:82px; }}
+    .lab {{ padding:12px 0 0; }}
     .tube, .hours {{ height:220px; }}
     li .r, li .bar {{ display:none; }}
   }}
   @media (prefers-reduced-motion:reduce) {{
-    .tube i, .tube .now, .tube .scar, .num, header::after {{ animation:none; }}
+    .tube i, .tube .now, .tube .scar, .num, .num::after, header::after,
+    .version, .streak-console::before, .risk .console-top b,
+    .mission-card, .receipt-card, .output-track i::after {{ animation:none; }}
   }}
 </style></head><body>
 <div class="wrap">
 
   <header>
-    <div class="brand">gitpulse <em>— when you actually shipped</em></div>
+    <div class="brand">gitpulse <em>— when you actually shipped</em><span class="version">V2 // ARCADE</span></div>
     <div class="stamp">{stamp}</div>
   </header>
 
   <div class="hero">
-    <div class="num">{head_num}</div>
-    <div class="lab">{head_lab}</div>
-    <div class="side">{scoreboard}</div>
+    <div class="hero-output"><div class="num">{head_num}</div><div class="lab">{head_lab}</div></div>
+    <div class="side">{streak_console}</div>
   </div>
 
+  <div class="section-label"><span>ACTIVITY ARRAY</span><b>{DAYS} DAY TRACE // LIVE</b></div>
   <div class="strip">
     <div class="hours">
       <span style="top:0%">00</span>
@@ -500,8 +649,10 @@ def render(commits, repos):
     <div class="cols">{''.join(cols)}</div>
   </div>
 
+  <div class="mission-grid">{mission_card}{receipt_card}</div>
+
   <div class="today">
-    <h2>Today</h2>
+    <div class="today-head"><div><span>TODAY // RAW SIGNAL</span><h2>Transmission log</h2></div><b>{len(todays):02d} EVENTS CAPTURED</b></div>
     <ul>{rows}</ul>
   </div>
 
@@ -517,16 +668,20 @@ def main():
               file=sys.stderr)
         sys.exit(1)
     quiet = "--quiet" in sys.argv
-    if "--fetch" in sys.argv:
+    should_fetch = "--no-fetch" not in sys.argv and not quiet
+    if should_fetch or "--fetch" in sys.argv:
         fetch_repos(repos, quiet)
     emails = author_emails(repos)
-    since = date.today() - timedelta(days=DAYS + 2)
+    since = date.today() - timedelta(days=HISTORY_DAYS + 2)
     commits = collect(repos, emails, since)
     html = render(commits, repos)
     with open(OUT, "w") as f:
         f.write(html)
     if not quiet:
-        print(f"gitpulse: {len(commits)} commits across {len(repos)} repos -> {OUT}")
+        print(
+            f"gitpulse: analyzed {len(commits)} commits across {len(repos)} repos "
+            f"({HISTORY_DAYS} days) -> {OUT}"
+        )
     if not quiet and "--no-open" not in sys.argv:
         subprocess.run(["open", OUT])
 

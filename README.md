@@ -2,26 +2,25 @@
 
 A local, self-contained picture of when you actually shipped. It reads your
 configured git repos and writes one standalone neon HTML dashboard — no server
-or dependencies, and no network access unless you pass `--fetch`. It regenerates
-on every commit and pops itself open on your screen every evening.
+or dependencies. Interactive runs refresh remotes first; background commit-hook
+runs stay offline. It regenerates on every commit and opens every evening.
 
-![the strip: 35 day-columns, each a midnight-to-midnight tube of glowing commit ticks](docs/preview.png)
+![Gitpulse V2 arcade dashboard with the 35-day activity array, streak, three-day output goal, and receipt](docs/preview.png)
 
 ## What you see
 
-- **Hero number** — total lines *shipped* (additions) over the last 35 days, in a
-  giant CRT-glow figure. Generated/vendored junk is excluded so it's honest code,
-  not lockfile churn.
-- **The strip** — 35 vertical columns, one per day, each a full midnight→midnight
-  tube. Every commit is a tick at its real time, colored by hour (cyan at night,
-  magenta at midday, orange at dusk) and *sized by how many lines it changed*. A
-  dense grind day is a stack of fat glowing slabs; a one-liner is a thin tick. A
-  gap day is a red glitch slash — impossible to miss.
-- **Today** (top right) — the live number: `+lines` shipped today, commit count,
-  time span, and your current streak. Today's column carries a pulsing "now" line
-  so it reads as still open.
-- **Today's log** — every commit from today with time, repo, `+adds −dels`, a
-  proportional churn bar, and the message.
+- **Hero output** — total authored lines shipped over the visible 35-day window.
+  Generated and vendored junk is excluded so lockfiles do not fake momentum.
+- **Streak core** — the current chain, 90-day personal best, and an at-risk
+  countdown when an active streak has not been secured today.
+- **Activity array** — 35 midnight-to-midnight tubes. Commits are positioned by
+  time, colored by hour, and log-sized by churn; gap days leave red glitch scars.
+- **Three-day output** — authored additions from the latest three calendar days
+  against the average three-day output across the preceding six days.
+- **Live receipt** — today's output, repositories, commit count, and time span,
+  switching to a nightly receipt for the evening run.
+- **Transmission log** — every commit from today with repository, churn, relative
+  weight, and subject.
 
 ## Install
 
@@ -47,10 +46,10 @@ The page lives at `~/gitpulse.html`.
 ## Usage
 
 ```bash
-gitpulse           # regenerate and open the page
-gitpulse --fetch   # fetch all remotes, regenerate, and open
-gitpulse --no-open # regenerate without opening
-gitpulse --quiet   # regenerate silently without opening (used by the commit hook)
+gitpulse            # fetch remotes, regenerate, and open
+gitpulse --no-fetch # use local refs, regenerate, and open
+gitpulse --no-open  # fetch and regenerate without opening
+gitpulse --quiet    # local-only, silent, and headless (used by the commit hook)
 ```
 
 `~/.local/bin` must be on your `PATH` for the bare `gitpulse` command to work.
@@ -64,6 +63,7 @@ All at the top of the `gitpulse` script:
 - `AUTHOR_EMAILS` — author identities included in the dashboard. The current
   configuration includes both personal and Kaguya email addresses.
 - `DAYS` — number of day-columns on the strip (default 35).
+- `HISTORY_DAYS` — history used for personal bests and adaptive goals (default 90).
 - `EXCLUDE` — git pathspecs whose line counts are ignored (lockfiles, fixtures,
   snapshots, minified/vendored/generated code) so churn reflects authored work.
   Add a glob here if a generated file in one of your repos is inflating the count.
