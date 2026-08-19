@@ -3,9 +3,10 @@
 gitpulse — a local, self-contained picture of when you actually shipped.
 
 Scans your repos, reads git log, writes one standalone HTML file.
-No server, no network, no dependencies. Open it with a double click.
+No server or dependencies. Network access is opt-in. Open it with a double click.
 
   gitpulse            regenerate the page
+  gitpulse --fetch    fetch remotes, then regenerate
   gitpulse --open     regenerate and open it
 """
 
@@ -16,12 +17,11 @@ from datetime import datetime, timedelta, date
 
 # ---------------------------------------------------------------- config
 
-# Folders to scan for git repos (searched a few levels deep).
-ROOTS = [
-    os.path.expanduser("~/Documents"),
-    os.path.expanduser("~/code"),
-    os.path.expanduser("~/dev"),
-    os.path.expanduser("~/projects"),
+# Repositories to include in the dashboard.
+REPOS = [
+    os.path.expanduser("~/Documents/Vasanth/nila"),
+    os.path.expanduser("~/Documents/Vasanth/kaguya"),
+    os.path.expanduser("~/Documents/Vasanth/nila-connector"),
 ]
 
 # Only count commits authored by these emails. Empty list = count everything.
@@ -30,9 +30,6 @@ AUTHOR_EMAILS = []
 
 DAYS = 35                                            # columns on the strip
 OUT = os.path.expanduser("~/gitpulse.html")
-SCAN_DEPTH = 3
-SKIP_DIRS = {"node_modules", "deps", "_build", ".elixir_ls", "vendor",
-             "target", "Library", ".Trash", "venv", ".venv", "dist"}
 
 # Line counts ignore generated/vendored junk so churn reflects authored code,
 # not lockfile churn. git pathspecs, matched anywhere in the tree.
@@ -59,21 +56,8 @@ EXCLUDE = [f":(exclude){p}" for p in EXCLUDE]
 
 
 def find_repos():
-    found = []
-    for root in ROOTS:
-        if not os.path.isdir(root):
-            continue
-        base_depth = root.rstrip("/").count("/")
-        for dirpath, dirnames, _ in os.walk(root):
-            dirnames[:] = [d for d in dirnames
-                           if d not in SKIP_DIRS and not d.startswith(".git")]
-            if os.path.isdir(os.path.join(dirpath, ".git")):
-                found.append(dirpath)
-                dirnames[:] = []
-                continue
-            if dirpath.count("/") - base_depth >= SCAN_DEPTH:
-                dirnames[:] = []
-    return sorted(set(found))
+    return [repo for repo in REPOS
+            if os.path.exists(os.path.join(repo, ".git"))]
 
 
 def git(repo, *args):
@@ -83,6 +67,25 @@ def git(repo, *args):
         return out.stdout if out.returncode == 0 else ""
     except Exception:
         return ""
+
+
+def fetch_repos(repos, quiet):
+    for repo in repos:
+        name = os.path.basename(repo)
+        if not quiet:
+            print(f"gitpulse: fetching {name}...")
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo, "fetch", "--all", "--prune"],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                print(f"gitpulse: failed to fetch {name}: {detail}",
+                      file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"gitpulse: failed to fetch {name}: {error}",
+                  file=sys.stderr)
 
 
 def author_emails(repos):
@@ -507,9 +510,12 @@ def render(commits, repos):
 def main():
     repos = find_repos()
     if not repos:
-        print("gitpulse: no repos found. Edit ROOTS at the top of this file.",
+        print("gitpulse: no repos found. Edit REPOS at the top of this file.",
               file=sys.stderr)
         sys.exit(1)
+    quiet = "--quiet" in sys.argv
+    if "--fetch" in sys.argv:
+        fetch_repos(repos, quiet)
     emails = author_emails(repos)
     since = date.today() - timedelta(days=DAYS + 2)
     commits = collect(repos, emails, since)
@@ -518,7 +524,7 @@ def main():
         f.write(html)
     if "--open" in sys.argv:
         subprocess.run(["open", OUT])
-    elif "--quiet" not in sys.argv:
+    elif not quiet:
         print(f"gitpulse: {len(commits)} commits across {len(repos)} repos -> {OUT}")
 
 

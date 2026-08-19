@@ -1,9 +1,9 @@
 # gitpulse
 
-A local, self-contained picture of when you actually shipped. It scans your git
-repos, reads the log, and writes one standalone neon HTML dashboard — no server,
-no network, no dependencies. It regenerates on every commit and pops itself open
-on your screen every evening.
+A local, self-contained picture of when you actually shipped. It reads your
+configured git repos and writes one standalone neon HTML dashboard — no server
+or dependencies, and no network access unless you pass `--fetch`. It regenerates
+on every commit and pops itself open on your screen every evening.
 
 ![the strip: 35 day-columns, each a midnight-to-midnight tube of glowing commit ticks](docs/preview.png)
 
@@ -47,7 +47,8 @@ The page lives at `~/gitpulse.html`.
 ## Usage
 
 ```bash
-gitpulse           # regenerate the page silently, print a one-line summary
+gitpulse           # regenerate the page, print a one-line summary
+gitpulse --fetch   # fetch all remotes and prune, then regenerate
 gitpulse --open    # regenerate and open it in your browser
 gitpulse --quiet   # regenerate silently, no output (used by the commit hook)
 ```
@@ -58,14 +59,12 @@ gitpulse --quiet   # regenerate silently, no output (used by the commit hook)
 
 All at the top of the `gitpulse` script:
 
-- `ROOTS` — folders scanned for repos (default: `~/Documents`, `~/code`, `~/dev`,
-  `~/projects`), searched `SCAN_DEPTH` (3) levels deep. Edit if your code lives
-  elsewhere.
+- `REPOS` — exact local repository paths included in the dashboard. The default
+  configuration tracks `nila`, `kaguya`, and `nila-connector`.
 - `AUTHOR_EMAILS` — empty by default, which auto-detects your email from git
   config so other people's commits in shared repos don't pollute your numbers.
   Set explicit emails to override.
 - `DAYS` — number of day-columns on the strip (default 35).
-- `SKIP_DIRS` — directory names skipped during the repo scan.
 - `EXCLUDE` — git pathspecs whose line counts are ignored (lockfiles, fixtures,
   snapshots, minified/vendored/generated code) so churn reflects authored work.
   Add a glob here if a generated file in one of your repos is inflating the count.
