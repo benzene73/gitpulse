@@ -44,7 +44,6 @@ cat > "$PLIST" <<PLISTEOF
   <key>ProgramArguments</key>
   <array>
     <string>$BIN/gitpulse</string>
-    <string>--open</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>45</integer></dict>
@@ -57,7 +56,7 @@ launchctl load "$PLIST"
 echo "installed  $PLIST  (fires 20:45 daily)"
 
 # 4. first run
-"$BIN/gitpulse" --open
+"$BIN/gitpulse"
 echo
 echo "done. page lives at ~/gitpulse.html"
-echo "run it any time with: gitpulse --open   (add ~/.local/bin to PATH if needed)"
+echo "run it any time with: gitpulse   (add ~/.local/bin to PATH if needed)"

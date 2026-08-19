@@ -5,9 +5,9 @@ gitpulse — a local, self-contained picture of when you actually shipped.
 Scans your repos, reads git log, writes one standalone HTML file.
 No server or dependencies. Network access is opt-in. Open it with a double click.
 
-  gitpulse            regenerate the page
-  gitpulse --fetch    fetch remotes, then regenerate
-  gitpulse --open     regenerate and open it
+  gitpulse            regenerate and open the page
+  gitpulse --fetch    fetch remotes, regenerate, and open
+  gitpulse --no-open  regenerate without opening
 """
 
 import os
@@ -522,10 +522,10 @@ def main():
     html = render(commits, repos)
     with open(OUT, "w") as f:
         f.write(html)
-    if "--open" in sys.argv:
-        subprocess.run(["open", OUT])
-    elif not quiet:
+    if not quiet:
         print(f"gitpulse: {len(commits)} commits across {len(repos)} repos -> {OUT}")
+    if not quiet and "--no-open" not in sys.argv:
+        subprocess.run(["open", OUT])
 
 
 if __name__ == "__main__":

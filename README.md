@@ -47,10 +47,10 @@ The page lives at `~/gitpulse.html`.
 ## Usage
 
 ```bash
-gitpulse           # regenerate the page, print a one-line summary
-gitpulse --fetch   # fetch all remotes and prune, then regenerate
-gitpulse --open    # regenerate and open it in your browser
-gitpulse --quiet   # regenerate silently, no output (used by the commit hook)
+gitpulse           # regenerate and open the page
+gitpulse --fetch   # fetch all remotes, regenerate, and open
+gitpulse --no-open # regenerate without opening
+gitpulse --quiet   # regenerate silently without opening (used by the commit hook)
 ```
 
 `~/.local/bin` must be on your `PATH` for the bare `gitpulse` command to work.
