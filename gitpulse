@@ -448,7 +448,7 @@ def render(commits, repos):
         transition:background .15s; }}
   li:hover {{ background:#00e5ff08; }}
   li .t {{ flex:none; width:44px; text-shadow:0 0 8px currentColor; }}
-  li .r {{ flex:none; width:96px; color:var(--purple); overflow:hidden;
+  li .r {{ flex:none; width:150px; color:var(--purple); overflow:hidden;
            text-overflow:ellipsis; white-space:nowrap; }}
   li .ch {{ flex:none; width:104px; display:flex; gap:8px; justify-content:flex-end;
            font-variant-numeric:tabular-nums; }}
