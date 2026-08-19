@@ -24,9 +24,12 @@ REPOS = [
     os.path.expanduser("~/Documents/Vasanth/nila-connector"),
 ]
 
-# Only count commits authored by these emails. Empty list = count everything.
-# Leave as-is to auto-detect from `git config user.email`.
-AUTHOR_EMAILS = []
+# Only count commits authored by these emails. Empty list auto-detects from
+# `git config user.email`.
+AUTHOR_EMAILS = [
+    "vasanthk@kaguya.io",
+    "benzene12378@gmail.com",
+]
 
 DAYS = 35                                            # columns on the strip
 OUT = os.path.expanduser("~/gitpulse.html")

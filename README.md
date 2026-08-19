@@ -61,9 +61,8 @@ All at the top of the `gitpulse` script:
 
 - `REPOS` — exact local repository paths included in the dashboard. The default
   configuration tracks `nila`, `kaguya`, and `nila-connector`.
-- `AUTHOR_EMAILS` — empty by default, which auto-detects your email from git
-  config so other people's commits in shared repos don't pollute your numbers.
-  Set explicit emails to override.
+- `AUTHOR_EMAILS` — author identities included in the dashboard. The current
+  configuration includes both personal and Kaguya email addresses.
 - `DAYS` — number of day-columns on the strip (default 35).
 - `EXCLUDE` — git pathspecs whose line counts are ignored (lockfiles, fixtures,
   snapshots, minified/vendored/generated code) so churn reflects authored work.
