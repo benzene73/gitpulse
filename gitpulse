@@ -18,11 +18,18 @@ from datetime import datetime, timedelta, date
 # ---------------------------------------------------------------- config
 
 # Repositories to include in the dashboard.
-REPOS = [
-    os.path.expanduser("~/Documents/Vasanth/nila"),
-    os.path.expanduser("~/Documents/Vasanth/kaguya"),
-    os.path.expanduser("~/Documents/Vasanth/nila-connector"),
-]
+if os.name == "nt":
+    REPOS = [
+        r"D:\nila",
+        r"D:\kaguya",
+        r"D:\nila-connector",
+    ]
+else:
+    REPOS = [
+        os.path.expanduser("~/Documents/Vasanth/nila"),
+        os.path.expanduser("~/Documents/Vasanth/kaguya"),
+        os.path.expanduser("~/Documents/Vasanth/nila-connector"),
+    ]
 
 # Only count commits authored by these emails. Empty list auto-detects from
 # `git config user.email`.
@@ -675,7 +682,7 @@ def main():
     since = date.today() - timedelta(days=HISTORY_DAYS + 2)
     commits = collect(repos, emails, since)
     html = render(commits, repos)
-    with open(OUT, "w") as f:
+    with open(OUT, "w", encoding="utf-8") as f:
         f.write(html)
     if not quiet:
         print(
@@ -683,7 +690,10 @@ def main():
             f"({HISTORY_DAYS} days) -> {OUT}"
         )
     if not quiet and "--no-open" not in sys.argv:
-        subprocess.run(["open", OUT])
+        if os.name == "nt":
+            os.startfile(OUT)
+        else:
+            subprocess.run(["open", OUT])
 
 
 if __name__ == "__main__":
