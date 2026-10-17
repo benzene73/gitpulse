@@ -59,7 +59,8 @@ gitpulse --quiet    # local-only, silent, and headless (used by the commit hook)
 All at the top of the `gitpulse` script:
 
 - `REPOS` — exact local repository paths included in the dashboard. The default
-  configuration tracks `nila`, `kaguya`, and `nila-connector`.
+  configuration tracks `nila`, `kaguya`, and `nila-connector`, plus `personal-site`
+  on Windows.
 - `AUTHOR_EMAILS` — author identities included in the dashboard. The current
   configuration includes both personal and Kaguya email addresses.
 - `DAYS` — number of day-columns on the strip (default 35).

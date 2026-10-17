@@ -23,6 +23,7 @@ if os.name == "nt":
         r"D:\nila",
         r"D:\kaguya",
         r"D:\nila-connector",
+        r"D:\personal-site",
     ]
 else:
     REPOS = [
